@@ -1,0 +1,3 @@
+{:allowed-domain-dirs ["Sources" "Components" "Outputs" "Research" "Development" "Core" "Library" "VersionOne"]
+ :allowed-runtime-dirs [".git" ".jj" ".direnv" "target" ".mentci" ".gemini" "tmp" "result"]
+ :allowed-top-files ["flake.nix" "flake.lock" ".gitignore" ".envrc" "AGENTS.md" "README.md" ".attrs.json" ".opencode.edn" "Cargo.toml" "Cargo.lock" "result"]}

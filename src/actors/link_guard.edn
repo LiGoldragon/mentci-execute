@@ -1,0 +1,16 @@
+{:roots ["AGENTS.md" "Core" "Library" "Components" "Research" "Development"]
+ :rules [
+  {:name "Agents"
+   :regex "(?i)Library/architecture/AGENTS\\\\.md"
+   :message "forbidden reference to Library/architecture/AGENTS.md (use Core/AGENTS.md)"}
+  {:name "Goals"
+   :regex "(?i)Library/architecture/HIGH_LEVEL_GOALS\\\\.md"
+   :message "forbidden reference to Library/architecture/HIGH_LEVEL_GOALS.md (use Core/HIGH_LEVEL_GOALS.md)"}
+  {:name "Restart"
+   :regex "(?i)Library/guides/RestartContext\\\\.md"
+   :message "forbidden reference to Library/guides/RestartContext.md (use Library/RestartContext.md)"}
+  {:name "Inputs"
+   :regex "(?i)`inputs/[^`\\\\n]+`|\"inputs/[^\"\\\\n]+\""
+   :message "lowercase inputs/ path detected"}
+ ]
+ :allowlist ["src/actors/link_guard.rs" "Components/mentci-aid/src/actors/link_guard.edn" "execute"]}
