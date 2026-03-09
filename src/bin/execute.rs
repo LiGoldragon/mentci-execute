@@ -1,15 +1,120 @@
 use ractor::Actor;
+use serde_json::{json, Value};
 use std::env;
+use std::path::{Path, PathBuf};
+
 use mentci_aid::actors::{Orchestrator, SymbolicMessage};
+
+fn runtime_context_path() -> Option<PathBuf> {
+    if let Ok(path) = env::var("MENTCI_RUNTIME_CONTEXT_FILE") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+
+    if let Ok(agent_dir) = env::var("PI_CODING_AGENT_DIR") {
+        let trimmed = agent_dir.trim();
+        if !trimmed.is_empty() {
+            return Some(Path::new(trimmed).join("runtime-context.json"));
+        }
+    }
+
+    None
+}
+
+fn infer_bookmark_from_dir_name(cwd: &Path) -> Option<String> {
+    let name = cwd.file_name()?.to_string_lossy().to_lowercase();
+
+    if let Some((_, suffix)) = name.rsplit_once("--") {
+        let s = suffix.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+
+    if name == "mentci-ai" {
+        return Some("main".to_string());
+    }
+
+    None
+}
+
+fn resolve_target_bookmark() -> (String, String) {
+    if let Ok(value) = env::var("MENTCI_TARGET_BOOKMARK") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return (trimmed.to_string(), "env:MENTCI_TARGET_BOOKMARK".to_string());
+        }
+    }
+
+    if let Some(path) = runtime_context_path() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(data) = serde_json::from_str::<Value>(&content) {
+                if let Some(bookmark) = data
+                    .get("targetBookmark")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
+                    return (bookmark.to_string(), format!("json:{}#targetBookmark", path.display()));
+                }
+            }
+        }
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        if let Some(bookmark) = infer_bookmark_from_dir_name(&cwd) {
+            return (bookmark, "cwd-suffix-fallback".to_string());
+        }
+    }
+
+    ("dev".to_string(), "default:dev".to_string())
+}
+
+fn current_solar_time() -> anyhow::Result<String> {
+    let output = std::process::Command::new("chronos")
+        .args(["--precision", "second"])
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => std::process::Command::new("cargo")
+            .args([
+                "run",
+                "--quiet",
+                "--manifest-path",
+                "Components/chronos/Cargo.toml",
+                "--bin",
+                "chronos",
+                "--",
+                "--precision",
+                "second",
+            ])
+            .output()?,
+    };
+
+    if !output.status.success() {
+        anyhow::bail!("chronos failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    
+
     if args.is_empty() {
         println!("execute: actor-based symbolic orchestrator");
         println!("usage: execute <command> [args...]");
-        println!("commands: root-guard, link-guard, session-guard, version, unify, intent, report, finalize, transition");
+        println!("commands: root-guard, link-guard, session-guard, version, target-bookmark, session-meta, unify, intent, report, finalize, transition");
+        return Ok(());
+    }
+
+    if args[0].as_str() == "target-bookmark" {
+        let (bookmark, _) = resolve_target_bookmark();
+        println!("{}", bookmark);
         return Ok(());
     }
 
@@ -22,7 +127,9 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => println!("Root guard passed."),
                 Err(errors) => {
                     eprintln!("Root guard failed:");
-                    for err in errors { eprintln!("- {}", err); }
+                    for err in errors {
+                        eprintln!("- {}", err);
+                    }
                     std::process::exit(1);
                 }
             }
@@ -33,7 +140,9 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => println!("Reference guard passed."),
                 Err(errors) => {
                     eprintln!("Reference guard failed:");
-                    for err in errors { eprintln!("- {}", err); }
+                    for err in errors {
+                        eprintln!("- {}", err);
+                    }
                     std::process::exit(1);
                 }
             }
@@ -44,7 +153,9 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => println!("Session guard passed."),
                 Err(errors) => {
                     eprintln!("Session guard failed:");
-                    for err in errors { eprintln!("- {}", err); }
+                    for err in errors {
+                        eprintln!("- {}", err);
+                    }
                     std::process::exit(1);
                 }
             }
@@ -52,6 +163,24 @@ async fn main() -> anyhow::Result<()> {
         "version" => {
             let version = ractor::call!(orchestrator, SymbolicMessage::GetProgramVersion)?;
             println!("{}", version);
+        }
+        "session-meta" => {
+            let solar = current_solar_time().unwrap_or_else(|_| "unknown".to_string());
+            let version = ractor::call!(orchestrator, SymbolicMessage::GetProgramVersion)?;
+            let (bookmark, source) = resolve_target_bookmark();
+            let cwd = env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let payload = json!({
+                "solarTime": solar,
+                "coreVersion": version,
+                "targetBookmark": bookmark,
+                "bookmarkSource": source,
+                "cwd": cwd,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
         }
         "unify" => {
             let write = args.contains(&"--write".to_string());
@@ -85,11 +214,26 @@ async fn main() -> anyhow::Result<()> {
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--prompt" => { i += 1; prompt = args.get(i).cloned().unwrap_or_default(); }
-                    "--answer" => { i += 1; answer = args.get(i).cloned().unwrap_or_default(); }
-                    "--subject" => { i += 1; subject = args.get(i).cloned().unwrap_or_default(); }
-                    "--title" => { i += 1; title = args.get(i).cloned().unwrap_or_default(); }
-                    "--kind" => { i += 1; kind = args.get(i).cloned().unwrap_or("answer".to_string()); }
+                    "--prompt" => {
+                        i += 1;
+                        prompt = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--answer" => {
+                        i += 1;
+                        answer = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--subject" => {
+                        i += 1;
+                        subject = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--title" => {
+                        i += 1;
+                        title = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--kind" => {
+                        i += 1;
+                        kind = args.get(i).cloned().unwrap_or("answer".to_string());
+                    }
                     _ => {}
                 }
                 i += 1;
@@ -123,7 +267,8 @@ async fn main() -> anyhow::Result<()> {
             let mut prompt = String::new();
             let mut context = String::new();
             let mut changes = Vec::new();
-            let mut bookmark = "dev".to_string();
+            let (default_bookmark, _) = resolve_target_bookmark();
+            let mut bookmark = default_bookmark;
             let mut remote = "origin".to_string();
             let mut rev = "@".to_string();
             let mut no_push = false;
@@ -131,12 +276,28 @@ async fn main() -> anyhow::Result<()> {
 
             if let Ok(content) = std::fs::read_to_string(".mentci/session.json") {
                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(s) = data.get("summary").and_then(|v| v.as_str()) { summary = s.to_string(); }
-                    if let Some(s) = data.get("prompt").and_then(|v| v.as_str()) { prompt = s.to_string(); }
-                    if let Some(s) = data.get("context").and_then(|v| v.as_str()) { context = s.to_string(); }
-                    if let Some(s) = data.get("model").and_then(|v| v.as_str()) { model = s.to_string(); }
+                    if let Some(s) = data.get("summary").and_then(|v| v.as_str()) {
+                        summary = s.to_string();
+                    }
+                    if let Some(s) = data.get("prompt").and_then(|v| v.as_str()) {
+                        prompt = s.to_string();
+                    }
+                    if let Some(s) = data.get("context").and_then(|v| v.as_str()) {
+                        context = s.to_string();
+                    }
+                    if let Some(s) = data.get("model").and_then(|v| v.as_str()) {
+                        model = s.to_string();
+                    }
+                    if let Some(s) = data.get("bookmark").and_then(|v| v.as_str()) {
+                        if !s.trim().is_empty() {
+                            bookmark = s.trim().to_string();
+                        }
+                    }
                     if let Some(c) = data.get("changes").and_then(|v| v.as_array()) {
-                        changes = c.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                        changes = c
+                            .iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
                     }
                 }
             }
@@ -144,21 +305,61 @@ async fn main() -> anyhow::Result<()> {
             let mut i = 1;
             while i < args.len() {
                 match args[i].as_str() {
-                    "--summary" => { i += 1; summary = args.get(i).cloned().unwrap_or_default(); }
-                    "--prompt" => { i += 1; prompt = args.get(i).cloned().unwrap_or_default(); }
-                    "--context" => { i += 1; context = args.get(i).cloned().unwrap_or_default(); }
-                    "--change" => { i += 1; if let Some(c) = args.get(i) { changes.push(c.clone()); } }
-                    "--bookmark" => { i += 1; bookmark = args.get(i).cloned().unwrap_or("dev".to_string()); }
-                    "--remote" => { i += 1; remote = args.get(i).cloned().unwrap_or("origin".to_string()); }
-                    "--rev" => { i += 1; rev = args.get(i).cloned().unwrap_or("@".to_string()); }
-                    "--no-push" => { no_push = true; }
-                    "--model" => { i += 1; model = args.get(i).cloned().unwrap_or_default(); }
+                    "--summary" => {
+                        i += 1;
+                        summary = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--prompt" => {
+                        i += 1;
+                        prompt = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--context" => {
+                        i += 1;
+                        context = args.get(i).cloned().unwrap_or_default();
+                    }
+                    "--change" => {
+                        i += 1;
+                        if let Some(c) = args.get(i) {
+                            changes.push(c.clone());
+                        }
+                    }
+                    "--bookmark" => {
+                        i += 1;
+                        bookmark = args.get(i).cloned().unwrap_or(bookmark);
+                    }
+                    "--remote" => {
+                        i += 1;
+                        remote = args.get(i).cloned().unwrap_or("origin".to_string());
+                    }
+                    "--rev" => {
+                        i += 1;
+                        rev = args.get(i).cloned().unwrap_or("@".to_string());
+                    }
+                    "--no-push" => {
+                        no_push = true;
+                    }
+                    "--model" => {
+                        i += 1;
+                        model = args.get(i).cloned().unwrap_or_default();
+                    }
                     _ => {}
                 }
                 i += 1;
             }
 
-            let res = ractor::call!(orchestrator, SymbolicMessage::FinalizeSession, summary, prompt, context, changes, bookmark, remote, rev, no_push, model)?;
+            let res = ractor::call!(
+                orchestrator,
+                SymbolicMessage::FinalizeSession,
+                summary,
+                prompt,
+                context,
+                changes,
+                bookmark,
+                remote,
+                rev,
+                no_push,
+                model
+            )?;
             if let Err(e) = res {
                 eprintln!("Finalization failed: {}", e);
                 std::process::exit(1);
